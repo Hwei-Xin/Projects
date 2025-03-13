@@ -3,6 +3,6 @@
 ### Superstore: Tableau
 ### Airplane: R and Python
 ### Personal Loan & Credit Card Spending: R
-### Marriott: Research Proposal
+### Marriott: Research Proposals
 
 
