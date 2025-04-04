@@ -1,0 +1,945 @@
+## ----setup, include=FALSE-----------------------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE)
+
+
+## -----------------------------------------------------------------------------------------
+library(dplyr)                # Load 'dplyr' package for pipeline purpose
+library(ggplot2)              # Load 'ggplot2' package for data visualisation
+library(tidyr)                # Load 'tidyr' package
+library(tidyverse)            # Load 'tidyverse' package
+library(GGally)               # Load 'GGally' package for scatter plot matrix visualisation
+library(car)                  # Load 'car' package for linear and logistic regression model
+library(caTools)              # Load 'caTools' package for train-test split
+library(data.table)           # Load 'rpart.plot' package to proportion auto calculation
+library(reshape2)             # Load 'reshape2' package to reshape data for plot
+library (glmnet)              # Load 'glmnet' package for logistic regression
+library(leaps)
+library(caret)                # Load 'caret' package for cross-validation, weighted KNN
+library(class)                # Load 'class' package for KNN
+library(factoextra)           # Load 'factoextra' package for Clustering
+library(scales)               # Load 'scales' package for percentage conversion
+library(rpart)                # Load 'rpart' package for CART
+library(rpart.plot)	          # Load 'rpart.plot' package for CART plot
+library(randomForest)         # Load 'randomForest' package for random forest 
+library(pdp)                  # Load 'pdp' package for partial importance of X 
+
+
+## -----------------------------------------------------------------------------------------
+loan_df <- read.csv("Bank_Personal_Loan.csv")   # Read csv file as a data frame
+
+# Convert CCAvg to annual spending 
+loan_df$Annual_CCAvg = loan_df$CCAvg * 12
+
+# Check statistical summary to find any NA and abnormal values
+summary(loan_df)   # No NA values and "Experience" column has negative values
+loan_df <- subset(loan_df, loan_df$Experience >= 0)   # Filter out negative values from column
+
+# Add another possible important features such as Debt-Income Ratio
+loan_df <- loan_df %>% mutate(DTI = ((CCAvg*12*1000)+(Mortgage*1000))/(Income*1000))
+
+loan_df.org <- loan_df
+
+# Convert variables to categorical and use the default ordering
+loan_df <- loan_df %>% mutate(across(c(Family, Education, Personal.Loan, Securities.Account, CD.Account, Online, CreditCard), as.factor))
+
+
+## -----------------------------------------------------------------------------------------
+# Distribution of Customer Age
+Age_bar <- loan_df %>% mutate(Age_group = case_when(Age >=20 &  Age < 30  ~ "20-29", 
+                                         Age >=30 &  Age < 40  ~ "30-39",
+                                         Age >=40 &  Age < 50  ~ "40-49",
+                                         Age >=50 &  Age < 60  ~ "50-59",
+                                         Age >=60 ~ "More than 60")) %>% group_by(Age_group) %>%  ggplot(aes(x = Age_group, fill = Age_group)) +
+  geom_bar(color = "black", position = position_dodge()) +
+   scale_fill_manual(values = c("lightgreen", "#1A85FF", "#d55e00", "#f0e442", "#D35FB7")) +
+  labs(title = "Distribution of Customer Age", 
+       x = "Age of customers", 
+       y = "Count of customers") +   
+  theme(legend.position="none") +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.2, 
+            position = position_dodge(width = 0.9))
+  
+Age_bar
+## Only 8% and 14% of the customers were in their 20s and older than 60 respectively
+
+# Distribution of Income across Education Levels
+Income.edu_box <- ggplot(loan_df) +
+  geom_boxplot(aes(x = Education, y = Income, fill = Education)) +
+  stat_summary(aes(x = Education, y = Income), fun ="mean", geom = "point", 
+               shape = 4, size = 5, color = "black") +
+  labs(title = "Distribution of Income across Education Levels", 
+       x = "Education Levels", y = "Annual Income") +
+  theme(legend.position = "none")
+
+Income.edu_box
+## Undergraduates have highest mean income as compared to other education levels.
+
+
+# Bar plot of personal loan and credit card
+reshape_df1 <- melt(loan_df, id.vars = setdiff(names(loan_df), c('Personal.Loan',
+                        'CreditCard')),
+                    variable.name = 'categorical_var',
+                    value.name = 'categorical_value')
+
+combined_bar1 <- ggplot(reshape_df1, aes(x = categorical_var, y = , fill = as.factor(categorical_value))) +
+  geom_bar(position = "dodge", color = "white") +
+  labs(title = "Distribution of Personal Loan and Credit Card",
+         x = "Variables", y = "Count of customers", fill = "Value") +
+  scale_fill_manual(name = "Value", labels = c("0" = "No", "1" = "Yes"), 
+                    values = c("0" = "#005AB5", "1" = "#DC3220")) +
+  geom_text(stat = "count", aes(label = after_stat(count)), 
+            position = position_dodge(width=0.9), vjust=-0.25)
+
+combined_bar1
+
+# Scatter plot matrix of correlation
+CCAvg_corr <- ggpairs(data = loan_df.org, 
+                          columns = c('Annual_CCAvg', 'Age', 'Experience', 'Income',
+                                      'Family', 'Education', 'Securities.Account',
+                                      'CD.Account', 'Online', 'CreditCard',
+                                      'Mortgage', 'DTI', 'Personal.Loan'),
+                          lower = list(continuous = wrap("cor", size = 2.5, color = "darkblue")),
+                          upper = list(continuous = wrap("smooth", 
+                                                         size = 1, alpha = 0.1, 
+                                                         color = "red")),
+                          title = "Correlation Matrix of the Variables",
+                          diag = list(continuous = wrap("densityDiag", fill = "lightgreen"))) +
+                  theme_bw()
+
+CCAvg_corr
+## Credit Card Spending increases with higher Income, people who take up personal loans have higher Credit Card Spending and Income than people who do not, more CD account owners than non-CD account owners accepting a personal loan. 
+
+# Difference in Proportion of Personal Loan Acceptance based on Customer's Demographic Characteristics
+loan_df1 <- data.table(loan_df)
+loan_df1[, .(sum(Personal.Loan == 0)/4468, sum(Personal.Loan == 1)/480), keyby = .(CD.Account)]
+
+Prop_df <- cbind("Has a CD Account", 0.04, 0.29)
+colnames(Prop_df) <- c("Profile", "Prop_with_no_PL", "Prop_with_PL")
+Prop_df <- data.frame(Prop_df)
+
+round(loan_df1[Personal.Loan == 1][Income >= 0 & Income <70, .N]/nrow(loan_df1[Personal.Loan == 1]),2)
+round(loan_df1[Personal.Loan == 0][Income >= 0 & Income <70, .N]/nrow(loan_df1[Personal.Loan == 0]),2)
+Prop_df <- rbind(Prop_df, c("Annual Income < 70,000", 0.60, 0.01))
+
+round(loan_df1[Personal.Loan == 1][Income >=70, .N]/nrow(loan_df1[Personal.Loan == 1]),2)
+round(loan_df1[Personal.Loan == 0][Income >=70, .N]/nrow(loan_df1[Personal.Loan == 0]),2)
+Prop_df <- rbind(Prop_df, c("Annual Income >= 70,000", 0.40, 0.99))
+
+round(loan_df1[Personal.Loan == 1][Annual_CCAvg >=0 & Annual_CCAvg <18, .N]/nrow(loan_df1[Personal.Loan == 1]),2)
+round(loan_df1[Personal.Loan == 0][Annual_CCAvg >=0 & Annual_CCAvg <18, .N]/nrow(loan_df1[Personal.Loan == 0]),2)
+Prop_df <- rbind(Prop_df, c("Annual Credit Card Spending < 18,000", 0.50, 0.15))
+
+round(loan_df1[Personal.Loan == 1][Annual_CCAvg >=18, .N]/nrow(loan_df1[Personal.Loan == 1]),2)
+round(loan_df1[Personal.Loan == 0][Annual_CCAvg >=18, .N]/nrow(loan_df1[Personal.Loan == 0]),2)
+Prop_df <- rbind(Prop_df, c("Annual Credit Card Spending >= 18,000", 0.50, 0.85))
+
+round(loan_df1[Personal.Loan == 1][Education == 1, .N]/nrow(loan_df1[Personal.Loan == 1]),2)
+round(loan_df1[Personal.Loan == 0][Education == 1, .N]/nrow(loan_df1[Personal.Loan == 0]),2)
+Prop_df <- rbind(Prop_df, c("Education Level is Undergraduate", 0.44, 0.19))
+
+Prop_df$Prop_with_PL <- as.numeric(Prop_df$Prop_with_PL)
+Prop_df$Prop_with_no_PL <- as.numeric(Prop_df$Prop_with_no_PL)
+Prop_df$diff <- Prop_df$Prop_with_PL - Prop_df$Prop_with_no_PL
+
+
+## -----------------------------------------------------------------------------------------
+loan_df.class <- loan_df[-c(1, 7)]
+classification_m1 <- glm(Personal.Loan ~ .-ID -CCAvg, family = binomial, data = loan_df)   
+# Load the generalised linear model into m4 into m1
+
+summary(classification_m1)  
+
+log_df <- loan_df[-c(1, 2, 3, 5, 7, 9, 16)]
+
+classification_m2 <- glm(Personal.Loan ~ ., family = binomial, data = log_df)   
+## Age, Experience, ZIP Code, Mortgage and DTI were removed as they are insignificant based on P-value.
+
+vif(classification_m2)                
+## GVIF is smaller than 2 so no multicollinearity is detected
+
+options(scipen=100)         # Convert the values of results to *100 for results interpretation
+
+OR.m2 <- exp(coef(classification_m2))
+OR.m2
+
+OR.CI.m2 <- exp(confint(classification_m2))
+OR.CI.m2
+## Graduate and Advanced/Professional seem to have huge increase in the odds of customer taking personal loan than Undergraduates and the same for customers who owns a CD Account than those who do not.
+
+summary(classification_m2)
+## Final model: Personal Loan = -12.700+0.063(Income)-0.182(Family2)+1.972(Family3)+1.642(Family4)+3.922(Education2)+4.099(Education3)-0.865(Securities.Account1)+3.729(CD.Account1)-0.712(Online1)-0.959(CreditCard1)+0.0149(Annual_CCAvg).
+
+
+# Model train-test split
+set.seed(2025)
+train <- sample.split(Y = loan_df$Personal.Loan, SplitRatio = 0.7)
+class_trainset <- subset(loan_df.class, train == T)
+class_testset <- subset(loan_df.class, train == F)
+
+# Assign weights
+class_counts <- table(class_trainset$Personal.Loan)
+class_weights <- nrow(class_trainset) / (length(class_counts)*class_counts)
+weights <- ifelse(class_trainset$Personal.Loan == 1, class_weights[2], class_weights[1])
+
+classification_m3 <- glm(Personal.Loan ~ ., family = binomial, weights = weights,
+                         data = class_trainset)
+
+summary(classification_m3)
+## P-value for variables like Family2 is much higher than in m2 due to data sacrificed for test set, leading to less confident in results.
+
+# Confusion Matrix
+prob.test <- predict(classification_m3, newdata = class_testset, type = 'response')   # Generate the probability of  personal loan for test set
+
+threshold <- sum(loan_df$Personal.Loan == 1)/ length(loan_df$Personal.Loan)    
+# Use empirical threshold which better reflects the data set class weights
+
+predict_loan.test <- ifelse(prob.test > threshold, 1, 0)  # Convert the probability to 1 and 0
+
+log_df <- data.frame(class_testset$Personal.Loan, predict_loan.test)
+
+log_df  <- log_df %>% count(class_testset.Personal.Loan, predict_loan.test) %>% rename("count" = "n")
+
+log_cmat.test <- ggplot(data = log_df, 
+                         mapping = aes(x = factor(predict_loan.test), 
+                                       y = class_testset.Personal.Loan,
+                                       fill = count)) +
+                        geom_tile(color = "black") +      # Outline the box with black
+                        geom_text(aes(label = count), size = 4) + 
+                        scale_y_discrete(limits = rev(levels(log_df$class_testset.Personal.Loan))) +
+                        scale_fill_gradient(low = "white", high = "#D55E00") +   
+                        labs(title = "Logistic Regression Confusion Matrix", x = "Prediction",
+                             y = "Actual") +    # Label the title, x and y axis
+                        scale_x_discrete(position = "top") # Change the x-axis label to the top
+
+log_cmat.test 
+
+# Calculate the accuracy of prediction
+accuracy_log <- mean(predict_loan.test == class_testset$Personal.Loan) 
+## Accuracy is 0.7075472 or 70.75%. 
+
+# Calculate type 1 error(False Positive rate)
+Type_1.log <- sum(predict_loan.test == 1 & class_testset$Personal.Loan == 0)/
+  sum(class_testset$Personal.Loan == 0)  
+## Type 1 error/False Positive rate is 0.3216418 or 32.39%.
+
+# Calculate type 2 error(False Negative rate)
+Type_2.log <- sum(predict_loan.test == 0 & class_testset$Personal.Loan == 1)/
+  sum(class_testset$Personal.Loan == 1)  
+## Type 2 error is 0.02083333 or 2.08%. 
+
+# Calculate precision
+precision_log <- sum(predict_loan.test == 1 & class_testset$Personal.Loan == 1)/
+  sum(predict_loan.test == 1)  
+## Precision is 0.2465035 or 24.65%.
+
+# Calculate Recall (Sensitivity|True Positive rate)
+recall_log <- sum(predict_loan.test == 1 & class_testset$Personal.Loan == 1)/
+  sum(class_testset$Personal.Loan == 1)  
+## Recall is 0.9791667 or 97.92%.
+
+# Calculate f1 score
+f1_score.log <- (2*(precision_log*recall_log))/(precision_log+recall_log)
+## f1 score is 0.3938547 or 39.39%.
+
+Impt <- as.data.frame(varImp(classification_m3))
+Impt$Weightage <- 100*(Impt$Overall/sum(Impt$Overall))
+## Income and Education level are important variables to determine if customers accept a personal loan.
+
+
+## -----------------------------------------------------------------------------------------
+# Transform the data for scaling purposes
+set.seed(2025)
+train <- sample.split(Y = loan_df$Personal.Loan, SplitRatio = 0.7)
+knn_train <- subset(loan_df.class, train == T)
+knn_test <- subset(loan_df.class, train == F)
+
+# Encode the categorical variables in trainset
+x_train.knn <- model.matrix(Personal.Loan ~. , data = knn_train)[ , -1]
+y_train.knn <- knn_train$Personal.Loan
+
+# Encode the categorical variables in testset
+x_test.knn <- model.matrix(Personal.Loan ~. , data = knn_test)[ , -1]
+y_test.knn <- knn_test$Personal.Loan
+  
+knn_train1 <- as.data.frame(x_train.knn)
+knn_train1$Personal.Loan  <- knn_train$Personal.Loan
+
+cv_fold <- trainControl(method = "repeatedcv", number = 10, repeats = 5) # Set the cross-validation to 10-fold and repeat for 5 times
+
+knn_model <- train(
+  Personal.Loan ~ ., 
+  data = knn_train1,
+  method = "kknn",  # Weighted KNN
+  tuneGrid = expand.grid(kmax = 1:10, distance = 2, kernel = "triangular"),  # Grid search for k from 1 to 10 and distance is 2 means to use Euclidean distance
+  trControl = cv_fold,
+  preProcess = c("center", "scale")  # Apply scaling
+)
+
+optimal_k <- knn_model$bestTune$kmax
+# Optimal k is 4.
+
+k_plot <- ggplot(knn_model) +
+    geom_line(aes(x = kmax, y = Accuracy)) +
+    geom_point(aes(x = kmax, y = Accuracy)) +
+    labs(title = "KNN Cross-Validation Results", x = "Number of Neighbours (k)", 
+         y = "Accuracy") +
+    geom_text(aes(x = kmax, y = Accuracy, label = round(Accuracy, 5)), 
+            vjust = -0.6, size = 3)
+k_plot
+
+x_train_scale <- scale(x_train.knn) # Scale the train x variables before prediction
+x_test_scale <- scale(x_test.knn)   # Scale the test x variables before prediction
+knn_prediction <- knn(train = x_train_scale, test = x_test_scale, cl = y_train.knn, k=optimal_k)
+
+knn_df <- data.frame(table(knn_prediction, y_test.knn))
+
+KNN_cmat <- ggplot(data = knn_df, 
+                         mapping = aes(x = knn_prediction, 
+                                       y = y_test.knn, fill = Freq)) +
+                        geom_tile(color = "black") +      # Outline the box with black
+                        geom_text(aes(label = Freq), size = 4) + # Label the count of each box 
+                        scale_y_discrete(limits = rev(levels(knn_df$y_test.knn))) +
+                        scale_fill_gradient(low = "white", high = "#0072B2") +   
+                        labs(title = "K-Nearest Neighbours Confusion Matrix", x = "Prediction",
+                             y = "Actual") +    # Label the title, x and y axis
+                        scale_x_discrete(position = "top") # Change the x-axis label to the top
+
+KNN_cmat
+
+accuracy_knn <- mean(knn_prediction == y_test.knn)
+# ## Accuracy is 0.9487871 or 94.88%.  
+
+# Calculate type 1 error (False Positive rate)
+Type_1.knn <- sum(knn_prediction == 1 & y_test.knn == 0)/
+  sum(y_test.knn == 0)  
+## Type 1 error is 0.005970149 or 0.60%.
+
+# Calculate type 2 error (False Negative rate)
+Type_2.knn <-sum(knn_prediction == 0 & y_test.knn == 1)/
+  sum(y_test.knn == 1) 
+## Type 2 error is 0.4722222 or 47.22%.
+
+# Calculate precision
+precision_knn <- sum(knn_prediction == 1 & y_test.knn == 1)/
+  sum(knn_prediction == 1)  
+## Precision is 0.9047619 or 90.48%.
+
+# Calculate Recall (Sensitivity|True Positive rate)
+recall_knn <- sum(knn_prediction == 1 & y_test.knn == 1)/
+  sum(y_test.knn == 1)  
+## Recall is 0.5277778 or 52.78%.
+
+# Calculate f1 score
+f1_score.knn <- (2*(precision_knn*recall_knn))/(precision_knn+recall_knn)
+## f1 score is 0.6666667 or 66.67%.
+
+varImp(knn_model)
+## Income, followed by Annual Credit Card Spending are important in identifying customer accepting personal loan.
+
+
+## -----------------------------------------------------------------------------------------
+set.seed(2025)
+train <- sample.split(Y = loan_df$Personal.Loan, SplitRatio = 0.7)
+cart.class_trainset <- subset(loan_df.class, train == T)
+cart.class_testset <- subset(loan_df.class, train == F)
+
+# Assign weights using Inverse Proportional Weighting
+class_counts <- table(cart.class_trainset$Personal.Loan)
+class_weights <- nrow(cart.class_trainset) / (length(class_counts)*class_counts)
+weights <- ifelse(cart.class_trainset$Personal.Loan == 1, class_weights[2], class_weights[1])
+
+cart.class_m1 <- rpart(Personal.Loan ~ ., data = cart.class_trainset, method = 'class',
+                       weights = weights, cp = 0) # Load the CART model with cost penalty of 0 and weight assignment to grow the tree  
+
+printcp(cart.class_m1, digits = 3)  # Show the cross-validation results of different cost penalty
+
+# CP Benchmark to choose the best optimal tree
+xerror_max <- cart.class_m1$cptable[which.min(cart.class_m1$cptable[,"xerror"]), "xerror"] + cart.class_m1$cptable[which.min(cart.class_m1$cptable[,"xerror"]), "xstd"]
+## CP benchmark is 0.08845469.
+
+# Find the optimal tree position based on the smallest tree below the CP benchmark
+i <- 1
+j<- 4
+while(cart.class_m1$cptable[i, j] > xerror_max){
+  i = i+1
+}
+## the position is 4th tree.
+
+cp.class_optimal <- ifelse(i > 1, sqrt(cart.class_m1$cptable[i, 1] * cart.class_m1$cptable[i-1, 1]), 1) # Use the geometric mean to find the optimal CP
+## Optimal CP is 0.01424447.
+
+cart.class_m2 <- prune(cart.class_m1, cp = cp.class_optimal) # Prune the tree based on optimal CP
+printcp(cart.class_m2, digits = 3)
+
+cart.class_prediction <- predict(cart.class_m2, cart.class_testset, type = "class") # Predict the class using test data in model 2 
+
+cart.class_df <- table(cart.class_testset$Personal.Loan, cart.class_prediction)
+cart.class_df <- data.frame(cart.class_df)
+
+CART_cmat <- ggplot(data = cart.class_df, 
+                         mapping = aes(x = cart.class_prediction, 
+                                       y = Var1, fill = Freq)) +
+                        geom_tile(color = "black") +      # Outline the box with black
+                        geom_text(aes(label = Freq), size = 4) + # Label the count of each box 
+                        scale_y_discrete(limits = rev(levels(cart.class_df$Var1))) +
+                        scale_fill_gradient(low = "white", high = "#009E73") +   
+                        labs(title = "CART Confusion Matrix", x = "Prediction",
+                             y = "Actual") +    # Label the title, x and y axis
+                        scale_x_discrete(position = "top") # Change the x-axis label to the top
+
+CART_cmat
+
+# Calculate the accuracy of prediction
+accuracy_CART <- mean(cart.class_prediction == cart.class_testset$Personal.Loan) 
+## Accuracy is 0.9238544 or 92.39%. 
+
+# Calculate type 1 error (False Positive rate)
+Type_1.CART <- sum(cart.class_prediction == 1 & cart.class_testset$Personal.Loan == 0)/ sum(cart.class_testset$Personal.Loan == 0)  
+## Type 1 error is 0.08283582 or 8.28%.
+
+# Calculate type 2 error (False Negative rate)
+Type_2.CART <- sum(cart.class_prediction == 0 & cart.class_testset$Personal.Loan == 1)/
+  sum(cart.class_testset$Personal.Loan == 1)  
+## Type 2 error is 0.01388889 or 1.39%. 
+
+# Calculate precision
+precision_CART <- sum(cart.class_prediction == 1 & cart.class_testset$Personal.Loan == 1)/sum(cart.class_prediction == 1)  
+## Precision is 0.5612648 or 56.13%.
+
+# Calculate Recall (Sensitivity|True Positive rate)
+recall_CART <- sum(cart.class_prediction == 1 & cart.class_testset$Personal.Loan == 1)/
+  sum(cart.class_testset$Personal.Loan == 1)  
+## Recall is 0.9861111 or 98.61%.
+
+# Calculate f1 score
+f1_score.CART <- (2*(precision_CART*recall_CART))/(precision_CART+recall_CART)
+## f1 score is 0.7153652 or 71.54%.
+
+100*(cart.class_m2$variable.importance/sum(cart.class_m2$variable.importance))
+## Income is the most important variable, followed by Annual Credit card spending and the rest
+
+decision_rule <- rpart.rules(cart.class_m2, nn = T, cover = T)
+
+
+## -----------------------------------------------------------------------------------------
+set.seed(2025)
+train <- sample.split(Y = loan_df$Personal.Loan, SplitRatio = 0.7)
+rf.class_trainset <- subset(loan_df.class, train == T)
+rf.class_testset <- subset(loan_df.class, train == F)
+
+# To find the optimal number of trees 
+trees <- c(50, 100, 200, 500) 
+OOB_error <- seq(1:4)     
+
+set.seed(2025)
+for (i in 1:length(trees)) {
+  rf_tunemodel <- randomForest(Personal.Loan ~ ., data=rf.class_trainset, 
+                               mtry= floor(sqrt(ncol(rf.class_trainset)-1)), 
+                               ntree = trees[i])
+  OOB_error[i] <- rf_tunemodel$err.rate[rf_tunemodel$ntree, 1]
+}
+
+results <- data.frame(trees, OOB_error)
+## Best number of trees is 200.
+
+# Assign weights
+class_counts <- table(rf.class_trainset$Personal.Loan)
+class_weights <- nrow(rf.class_trainset) / (length(class_counts)*class_counts)
+weights <- ifelse(rf.class_trainset$Personal.Loan == 1, class_weights[2], class_weights[1])
+
+rf_model <- randomForest(Personal.Loan ~ ., 
+                         data = rf.class_trainset, 
+                         ntree = 200,    # Apply the optimal number of trees
+                         mtry = floor(sqrt(ncol(rf.class_trainset)-1)),  # Apply the optimal number of X variables
+                         case.weights = weights,   # Apply weights
+                         importance = TRUE)     # Include importance of variables
+
+rf.class_prediction <- predict(rf_model, rf.class_testset)  # Apply model and predict the test data
+
+rf.class_df <- table(rf.class_testset$Personal.Loan, rf.class_prediction)
+rf.class_df <- data.frame(rf.class_df)
+
+rf_cmat <- ggplot(data = rf.class_df, 
+                         mapping = aes(x = rf.class_prediction, 
+                                       y = Var1, fill = Freq)) +
+                        geom_tile(color = "black") +      # Outline the box with black
+                        geom_text(aes(label = Freq), size = 4) + # Label the count of each box 
+                        scale_y_discrete(limits = rev(levels(rf.class_df$Var1))) +
+                        scale_fill_gradient(low = "white", high = "#8a00c2") +   
+                        labs(title = "Random Forest Confusion Matrix", 
+                             x = "Prediction",
+                             y = "Actual") +    # Label the title, x and y axis
+                        scale_x_discrete(position = "top") # Change the x-axis label to the top
+
+rf_cmat
+
+# Calculate the accuracy of prediction
+accuracy_rf <- mean(rf.class_prediction == rf.class_testset$Personal.Loan) 
+## Accuracy is 0.9871968 or 98.72%. 
+
+# Calculate type 1 error (False Positive rate)
+Type_1.rf <- sum(rf.class_prediction == 1 & rf.class_testset$Personal.Loan == 0)/ sum(rf.class_testset$Personal.Loan == 0)  
+## Type 1 error is 0.002985075 or 0.30%.
+
+# Calculate type 2 error (False Negative rate)
+Type_2.rf <- sum(rf.class_prediction == 0 & rf.class_testset$Personal.Loan == 1)/
+  sum(rf.class_testset$Personal.Loan == 1)  
+## Type 2 error is 0.1041667 or 10.42%. 
+
+# Calculate precision
+precision_rf <- sum(rf.class_prediction == 1 & rf.class_testset$Personal.Loan == 1)/sum(rf.class_prediction == 1)  
+## Precision is 0.9699248 or 96.99%.
+
+# Calculate Recall (Sensitivity|True Positive rate)
+recall_rf <- sum(rf.class_prediction == 1 & rf.class_testset$Personal.Loan == 1)/
+  sum(rf.class_testset$Personal.Loan == 1)  
+## Recall is 0.8958333 or 89.58%.
+
+# Calculate f1 score
+f1_score.rf <- (2*(precision_rf*recall_rf))/(precision_rf+recall_rf)
+## f1 score is 0.9314079 or 93.14%.
+
+importance(rf_model)
+## Income is the most important variable, followed by Education.
+
+pdp_education <- partial(rf_model, pred.var = "Education", plot = TRUE)
+## Among levels in Education, Undergraduates is the most important variable.
+
+
+## -----------------------------------------------------------------------------------------
+Class_eval.1 <- data.frame(
+  Model = c('Logistic Regression', 'K-Nearest Neighbours', 'CART', 'Random Forest'),
+  accuracy = c(accuracy_log, accuracy_knn, accuracy_CART, accuracy_rf),
+  f1_score = c(f1_score.log, f1_score.knn, f1_score.CART, f1_score.rf))
+
+Melt_eval.1 <- melt(Class_eval.1, id.vars = "Model")
+
+class_plot.1 <- ggplot(Melt_eval.1, aes(x = Model, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = 'dodge', color = "black") +
+  geom_text(aes(label = round((value),2)), size = 3.5, vjust = -0.2, 
+            position = position_dodge(width = 0.9)) + 
+  labs(title = "Models' Accuracy and F1-score", x = "Models", y = "Scores") +
+  theme_minimal() +
+  scale_fill_manual(name = "Measures", values = c("accuracy" = "#1A85FF", "f1_score" = "#f0e442")) 
+
+class_plot.1
+
+Class_eval.2 <- data.frame(
+  Model = c('Logistic Regression', 'K-Nearest Neighbours', 'CART', 'Random Forest'),
+  Type1 = c(Type_1.log, Type_1.knn, Type_1.CART, Type_1.rf),
+  Type2 = c(Type_2.log, Type_2.knn, Type_2.CART, Type_2.rf))
+
+Melt_eval.2 <- melt(Class_eval.2, id.vars = "Model")
+
+class_plot.2 <- ggplot(Melt_eval.2, aes(x = Model, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = 'dodge', color = "black") +
+  geom_text(aes(label = round((value), 4)), size = 3.5, vjust = -0.2, 
+            position = position_dodge(width = 0.9)) + 
+  labs(title = "Models' False Positive and False Negative Rate", x = "Models", y = "Scores") +
+  theme_minimal() +
+  scale_fill_manual(name = "Measures", labels = c("Type1" = "FP rate", "Type2" = "FN rate"), values = c("Type1" = "lightgreen", "Type2" = "#d55e00")) 
+
+class_plot.2
+
+
+Class_eval <- data.frame(
+  Model = c('Logistic Regression', 'K-Nearest Neighbours', 'CART', 'Random Forest'),
+  accuracy = c(accuracy_log, accuracy_knn, accuracy_CART, accuracy_rf),
+  precision = c(precision_log, precision_knn, precision_CART, precision_rf),
+  recall = c(recall_log, recall_knn, recall_CART, recall_rf),
+  f1_score = c(f1_score.log, f1_score.knn, f1_score.CART, f1_score.rf),
+  type_1 = c(Type_1.log, Type_1.knn, Type_1.CART, Type_1.rf),
+  type_2 = c(Type_2.log, Type_2.knn, Type_2.CART, Type_2.rf)) 
+
+
+## -----------------------------------------------------------------------------------------
+loan_df1 <- subset(loan_df, select = -c(ID, ZIP.Code, CCAvg, Personal.Loan))
+regression_m1 <- lm(Annual_CCAvg ~ ., data = loan_df1)   # Load linear model with all original variables
+
+regression_m2 <- step(regression_m1) # Remove identified insignificant X variables using backward elimination based on AIC values.
+
+vif(regression_m2)     # Check multicollinearity in X variables
+## Age and Experience have high multicollinearity as vif are 9.557 and 9.546 respectively.
+
+summary(regression_m2)
+## R Squared is 0.4367.
+## Final model is -17.922 + 0.715Age -0.744Experience + 0.322Income -0.971Education2 -1.055Education3 -0.033Mortgage +3.460CD.Account1 -0.782Online1 -0.772CreditCard1 +2.177DTI
+
+par(mfrow = c(2,2))  
+plot(regression_m2)   # Create diagnostic plot to check assumptions of regression 
+## Plot 1: No significant curve observed so there is linear relationship between Y and Xs.
+## Plot 2: No significant curve observed which signifies errors are normally distributed.
+## Plot 3: Errors are dependent of Xs and variance is not a constant.
+## Plot 4: No influential outliers detected.
+
+# Model training and evaluation
+set.seed(2025)
+train <- sample.split(Y = loan_df1$Annual_CCAvg, SplitRatio = 0.7)
+regression_trainset <- subset(loan_df1, train == T)
+regression_testset <- subset(loan_df1, train == F)
+
+regression_m3 <- lm(Annual_CCAvg ~ Age + Experience + Income + Education + Mortgage 
+                    + CD.Account + Online +  CreditCard + DTI, 
+                    data = regression_trainset) # Create the model by using data in train set
+
+predict_m3.test <- predict(regression_m3, newdata = regression_testset)   # Using m3 model to predict using test set data
+testset_residual <- regression_testset$Annual_CCAvg - predict_m3.test   # Compare predicted CCAvg with actual CCAvg.
+
+RMSE_linear <- sqrt(mean(testset_residual^2))  # Generate the RMSE for test set
+RMSE_linear
+## Test set RMSE is 15.433.
+
+Imp.reg <- as.data.frame(varImp(regression_m3))
+Imp.reg$Weightage <- 100*(Imp.reg$Overall/sum(Imp.reg$Overall))
+## Income is the most important variable, followed by DTI, Mortgage and the rest.
+
+
+## -----------------------------------------------------------------------------------------
+# Train-test split using 70-30
+set.seed(2025)
+lasso_train <- sample.split(Y = loan_df1$Annual_CCAvg, SplitRatio = 0.7)
+lasso_trainset <- subset(loan_df1, train == T)
+lasso_testset <- subset(loan_df1, train == F)
+
+x <- model.matrix(Annual_CCAvg ~ ., 
+                        data = loan_df1)[, -1]    # Auto transform categorical variable, save X variables into a matrix and exclude intercept from the matrix
+y <- loan_df1$Annual_CCAvg        # Specific what is the y variable
+x_train <- model.matrix(Annual_CCAvg ~ ., 
+                        data = lasso_trainset)[, -1]    # Auto transform categorical variable, save X variables into a matrix and exclude intercept from the matrix
+y_train <- lasso_trainset$Annual_CCAvg        # Specific what is the y variable
+x_test<- model.matrix(Annual_CCAvg ~ ., 
+                      data = lasso_testset)[, -1]
+y_test <- lasso_testset$Annual_CCAvg
+
+# Lasso Model Evaluation
+grid <- 10^seq(10,-2,length=100)
+lasso.model <- glmnet(x_train, y_train, alpha = 1, lambda = grid)
+
+lasso_cv <- cv.glmnet(x_train, y_train, alpha = 1) # Use trainset to cross validation and find the optimal lambda parameter
+plot(lasso_cv)
+best_lambda.lasso <- lasso_cv$lambda.min  # This gives a lambda that has smallest cross-validation error
+best_lambda.lasso 
+## The optimal lambda value is 0.003377.
+
+lasso_prediction <- predict(lasso.model, s = best_lambda.lasso, newx = x_test) # Use the model to predict new annual CCAvg using X variables in testset.
+RMSE_lasso <- sqrt(mean((lasso_prediction - y_test)^2))  
+## Testset RMSE is 15.438.
+
+lasso_model.full <- glmnet(x, y, alpha = 1, lambda = grid)  # Fit the model with full data set
+lasso.coef <- predict(lasso_model.full, type="coefficients", s = best_lambda.lasso)
+lasso.coef
+# Final model based on lambda value as 0.1271704.
+## Final model is -12.914 + 0.520(Age) -0.548(Experience) +0.32(Income) +0.339(Family2) -0.789(Family3) -0.76(Education2) -0.858(Education3) -0.0326(Mortgage) +3.452(CD.Account1) +0.0642(Securities.Account1) -0.749(Online1) -0.761(CreditCard1) +2.132(DTI).
+
+Imp.lasso <- as.data.frame(varImp(lasso.model,lambda = best_lambda.lasso))
+Imp.lasso$Weightage <- 100*(Imp.lasso$Overall/sum(Imp.lasso$Overall))
+## CD Account is the most important variable, followed by DTI and the rest.
+
+
+## -----------------------------------------------------------------------------------------
+set.seed(2025)
+train <- sample.split(Y = loan_df1$Annual_CCAvg, SplitRatio = 0.7)
+cart.reg_trainset <- subset(loan_df1, train == T)
+cart.reg_testset <- subset(loan_df1, train == F)
+
+cart.reg_m1 <- rpart(Annual_CCAvg ~ ., 
+                    data = cart.reg_trainset, method = 'anova', cp = 0) # Load the CART model with cost penalty of 0 to grow the tree
+
+printcp(cart.reg_m1, digits = 3)  # Show the cross-validation results of different cost penalty
+
+# CP Benchmark to choose the best optimal tree
+xerror_max <- cart.reg_m1$cptable[which.min(cart.reg_m1$cptable[,"xerror"]), "xerror"] + cart.reg_m1$cptable[which.min(cart.reg_m1$cptable[,"xerror"]), "xstd"]
+# Benchmark is 0.24028.
+
+# Find the optimal tree position based on the smallest tree below the CP benchmark
+i<- 1; j<- 4
+while(cart.reg_m1$cptable[i, j] > xerror_max){
+  i <- i+1
+}
+## the position is 46th tree. 
+
+cp.reg_optimal <- ifelse(i > 1, sqrt(cart.reg_m1$cptable[i,1] * cart.reg_m1$cptable[i-1,1]), 1) # Use the geometric mean to find the optimal CP
+## Optimal CP is 0.0009086402.
+
+cart.reg_m2 <- prune(cart.reg_m1, cp = cp.reg_optimal) # Prune the tree based on optimal cp
+
+cart.reg_prediction <- predict(cart.reg_m2, cart.reg_testset) 
+
+cart.reg_residual <- cart.reg_prediction - cart.reg_testset$Annual_CCAvg
+RMSE_cart <- sqrt(mean(cart.reg_residual^2))
+## RMSE is 9.204838.
+
+100*(cart.reg_m2$variable.importance/sum(cart.reg_m2$variable.importance))
+## Income is the most important variable, followed by DTI and Mortgage
+
+
+## -----------------------------------------------------------------------------------------
+set.seed(2025)
+train <- sample.split(Y = loan_df1$Annual_CCAvg, SplitRatio = 0.7)
+rf.reg_trainset <- subset(loan_df1, train == T)
+rf.reg_testset <- subset(loan_df1, train == F)
+
+# To find the optimal number of trees 
+trees <- c(100, 200, 500)
+OOB.error_reg <- seq(1:3)
+
+set.seed(2025)
+for (i in 1:length(trees)){
+  rf.reg_tunemodel <- randomForest(Annual_CCAvg ~ ., data=rf.reg_trainset, 
+                               mtry = floor((ncol(rf.reg_trainset)-1)/3), 
+                               ntree = trees[i])
+  OOB.error_reg[i] <- tail(rf.reg_tunemodel$mse, 1)
+}
+
+rf.results_reg <- data.frame(trees, OOB.error_reg)
+## Best number of trees is 500.
+
+
+# Model Training and Prediction
+rf_model.reg <- randomForest(Annual_CCAvg ~ ., 
+                             data=rf.reg_trainset,
+                             mtry = 3,
+                             ntree = 500,
+                             importance = TRUE)     # Include importance of variables
+
+rf.reg_prediction <- predict(rf_model.reg, rf.reg_testset)  # Apply model and predict the test data
+
+# Compute the RMSE
+rf.reg_residual <-rf.reg_prediction - rf.reg_testset$Annual_CCAvg
+RMSE_rf <- sqrt(mean((rf.reg_residual)^2))  
+## RMSE is 8.732861.
+
+importance(rf_model.reg)
+## Income is the most important variable, followed by DTI and the rest.
+
+
+## -----------------------------------------------------------------------------------------
+Reg_eval <- data.frame(
+  Model = c('Linear Regression', 'Lasso Regression', 'CART', 'Random Forest'),
+  RMSE = c(RMSE_linear, RMSE_lasso, RMSE_cart, RMSE_rf))
+
+reg_plot <- ggplot(Reg_eval, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = round((RMSE),3)), size = 3.5, vjust = -0.2, 
+            position = position_dodge(width = 0.9)) + 
+  labs(title = "Models' RMSE", x = "Models", y = "Scores") +
+  scale_fill_manual(values = c('Linear Regression' = "lightgreen", 
+                               'Lasso Regression'= "#1A85FF",
+                               'CART' = "#f0e442",
+                               'Random Forest' = "#d55e00"))+
+  theme(legend.position = "none")
+
+reg_plot
+
+
+## -----------------------------------------------------------------------------------------
+loan_df2 <- loan_df[ , -c(1, 7, 10, 11, 12, 13, 14)]
+loan_df2$Family <- as.numeric(loan_df2$Family)
+loan_df2$Education <- as.numeric(loan_df2$Education)
+
+loan_df3 <- scale(loan_df2)
+
+set.seed(2025)
+# Find optimal k using elbow and silhouette methods.
+fviz_nbclust(loan_df3, kmeans, method = "wss") +
+    labs(subtitle = "Elbow Method") 
+## Optimal K is 4.
+
+fviz_nbclust(loan_df3, kmeans, method = "silhouette") +
+  labs(subtitle = "Silhouette Method")
+## Optimal K is 4.
+
+kmeans_result <- kmeans(loan_df3, centers = 4, nstart = 25)  # Use nstart to determine the lowest mean within cluster variation
+cluster_sizes <- table(kmeans_result$cluster)  # Show each cluster size
+## the sizes were 1636(Cluster 1), 1598(Cluster 2), 1054(Cluster 3),  660(Cluster 4) 
+
+loan_df.clusters <- cbind(loan_df, Cluster = as.factor(kmeans_result$cluster)) # Convert cluster assignment to factor and combine them with original data 
+loan_df.clusters <- loan_df.clusters[ , -c(1, 7)] # Remove unnecessary columns
+
+# Plot graph for cluster visualization 
+Age_Cluster <- loan_df.clusters %>% mutate(Age_group = case_when(Age >=20 &  Age < 30  ~ "20-29", 
+                                         Age >=30 &  Age < 40  ~ "30-39",
+                                         Age >=40 &  Age < 50  ~ "40-49",
+                                         Age >=50 &  Age < 60  ~ "50-59",
+                                         Age >=60 ~ "More than 60")) %>% group_by(Age_group) %>%  ggplot(aes(x = Cluster, fill = Age_group)) +
+  geom_bar(color = "black") +
+  labs(title = "Distribution of Customer Age across Clusters",
+       fill = "Age Group",
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(values = c("lightgreen", "#9E9AC8", "#d55e00", "#1A85FF", "#f0e442")) +
+  geom_text(stat = "count", aes(label = after_stat(count)), size = 3, position = position_stack(vjust = 0.5))
+
+Age_Cluster
+## Cluster 1 seems to be customers who aged more than 40 years old, cluster 2 aged 20 to 49 years old, cluster 3 and 4 customers are more likely to be middle-aged.
+
+mean <- loan_df.clusters %>%
+  group_by(Cluster) %>%
+  summarise(exp_mean = mean(Experience)) 
+
+Exp_Cluster <- ggplot(loan_df.clusters) +
+  geom_boxplot(aes(x = Cluster, y = Experience, fill = Cluster)) +
+  stat_summary(aes(x = Cluster, y = Experience), fun ="mean", geom = "point", 
+               shape = 4, size = 5, color = "black") +
+  geom_text(data = mean, aes(x = Cluster, y = exp_mean, label = round(exp_mean, 0)), position = position_nudge(y = 2.5), size = 3, color = "black") +
+  scale_fill_manual(values = c("lightgreen", "#E66100", "#1A85FF", "#f0e442")) +
+  labs(title = "Distribution of Working Experience across Clusters", 
+       x = "Clusters", y = "Number of Working Years") +
+  theme(legend.position = "none")
+ 
+Exp_Cluster
+## Cluster 1 seems to have more working experience, followed by cluster 3, 4, 2.
+
+median <- loan_df.clusters %>%
+  group_by(Cluster) %>%
+  summarise(income_median = median(Income)) 
+
+Income_Cluster <- ggplot(loan_df.clusters) +
+  geom_boxplot(aes(x = Cluster, y = Income, fill = Cluster)) +
+  stat_summary(aes(x = Cluster, y = Income), fun ="median", geom = "point", 
+               shape = 4, size = 5, color = "black") +
+  geom_text(data = median, aes(x = Cluster, y = income_median, label = round(income_median, 2)), position = position_nudge(y = 12), size = 3, color = "black") +
+  scale_fill_manual(values = c("lightgreen", "#E66100", "#1A85FF", "#f0e442")) +
+  labs(title = "Distribution of Income across Clusters", 
+       x = "Clusters", y = "Annual Income") +
+  theme(legend.position = "none")
+ 
+Income_Cluster
+## Cluster 4 seems to have high income earners.
+
+Educ_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = Education)) +
+  geom_bar(color = "black") +
+  labs(title = "Distribution of Education Levels across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(label = c('Undergraduates', 'Graduate', 'Advanced/Professional'), values = c("lightgreen", "#f0e442", "#1A85FF")) +
+  geom_text(stat = "count", aes(label = after_stat(count)), size = 3, position = position_stack(vjust = 0.5))
+
+Educ_Cluster
+## Most of the customers in Cluster 4 belongs to undergraduates.
+
+Fam_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = Family)) +
+  geom_bar(color = "black") +
+  labs(title = "Distribution of Family Members across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(values = c("lightgreen", "#f0e442", "#d55e00", "#648FFF")) +
+  geom_text(stat = "count", aes(label = after_stat(count)), size = 3, position = position_stack(vjust = 0.5))
+
+Fam_Cluster
+## Cluster 4 seems to have lesser family members.
+
+median <- loan_df.clusters %>%
+  group_by(Cluster) %>%
+  summarise(Mort_median = median(Mortgage)) 
+
+Mortgage_Cluster <- ggplot(loan_df.clusters) +
+  geom_boxplot(aes(x = Cluster, y = Mortgage, fill = Cluster)) +
+  stat_summary(aes(x = Cluster, y = Mortgage), fun ="median", geom = "point", 
+               shape = 4, size = 5, color = "black") +
+  geom_text(data = median, aes(x = Cluster, y = Mort_median, label = round(Mort_median, 2)), position = position_nudge(y = 20), size = 3, color = "black") +
+  scale_fill_manual(values = c("lightgreen", "#E66100", "#1A85FF", "#f0e442")) +
+  labs(title = "Distribution of Mortgage across Clusters", 
+       x = "Clusters", y = "Mortgage") +
+  theme(legend.position = "none")
+ 
+Mortgage_Cluster
+## Cluster 3 seems to have extremely high mortgage.
+
+PL_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = Personal.Loan, weight = after_stat(count), by = Cluster)) +
+  geom_bar(position = "fill", color = "black") +
+  labs(title = "Distribution of Personal Loan Ownership across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(label = c('No', 'Yes'), values = c("lightgreen", "#648FFF")) +
+  geom_text(stat = "prop", size = 3, position = position_fill(vjust = 0.5))
+
+PL_Cluster
+## Cluster 4 have higher personal loan ownership as compared to other clusters.
+
+Card_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = CreditCard, weight = after_stat(count), by = Cluster)) +
+  geom_bar(position = "fill", color = "black") +
+  labs(title = "Distribution of Ownership of Thera Credit Card across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(label = c('No', 'Yes'), values = c("lightgreen", "#648FFF")) +
+  geom_text(stat = "prop", size = 3, position = position_fill(vjust = 0.5))
+
+Card_Cluster
+## Less than half of the customers own thera bank credit cards across all clusters.
+
+mean <- loan_df.clusters %>%
+  group_by(Cluster) %>%
+  summarise(CCavg_mean = mean(Annual_CCAvg)) 
+
+CCAvg_Cluster <- ggplot(loan_df.clusters) +
+  geom_boxplot(aes(x = Cluster, y = Annual_CCAvg, fill = Cluster)) +
+  stat_summary(aes(x = Cluster, y = Annual_CCAvg), fun ="mean", geom = "point", 
+               shape = 4, size = 5, color = "black") +
+  geom_text(data = mean, aes(x = Cluster, y = CCavg_mean, label = round(CCavg_mean, 2)), position = position_nudge(y = 5), size = 3, color = "black") +
+  scale_fill_manual(values = c("lightgreen", "#E66100", "#1A85FF", "#f0e442")) +
+  labs(title = "Distribution of Credit Card Spending across Clusters", 
+       x = "Clusters", y = "Annual Credit Card Spending") +
+  theme(legend.position = "none")
+ 
+CCAvg_Cluster
+## Cluster 4 have the highest mean credit card spending.
+
+mean <- loan_df.clusters %>%
+  group_by(Cluster) %>%
+  summarise(DTI_mean = mean(DTI)) 
+
+DTI_Cluster <- ggplot(loan_df.clusters) +
+  geom_boxplot(aes(x = Cluster, y = DTI, fill = Cluster)) +
+  stat_summary(aes(x = Cluster, y = DTI), fun ="mean", geom = "point", 
+               shape = 4, size = 5, color = "black") +
+  geom_text(data = mean, aes(x = Cluster, y = DTI_mean, label = round(DTI_mean, 2)), position = position_nudge(y = 0.4), size = 3, color = "black") +
+  scale_fill_manual(values = c("lightgreen", "#E66100", "#1A85FF", "#f0e442")) +
+  labs(title = "Distribution of DTI across Clusters", 
+       x = "Clusters", y = "DTI") +
+  theme(legend.position = "none")
+ 
+DTI_Cluster
+## Cluster 3 seems to have higher mean DTI.
+
+SA_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = Securities.Account, weight = after_stat(count), by = Cluster)) +
+  geom_bar(position = "fill", color = "black") +
+  labs(title = "Distribution of Securities Account Ownership across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(label = c('No', 'Yes'), values = c("lightgreen", "#648FFF")) +
+  geom_text(stat = "prop", size = 3, position = position_fill(vjust = 0.5))
+
+SA_Cluster
+## All clusters have less than half of the customers with no Securities account.
+
+CD_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = CD.Account, weight = after_stat(count), by = Cluster)) +
+  geom_bar(position = "fill", color = "black") +
+  labs(title = "Distribution of CD Account Ownership across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(label = c('No', 'Yes'), values = c("lightgreen", "#648FFF")) +
+  geom_text(stat = "prop", size = 3, position = position_fill(vjust = 0.5))
+
+CD_Cluster
+## Cluster 4 has the highest CD account ownership though more than 50% of them do not have.
+
+Online_Cluster <- loan_df.clusters %>% ggplot(aes(x = Cluster, fill = Online, weight = after_stat(count), by = Cluster)) +
+  geom_bar(position = "fill", color = "black") +
+  labs(title = "Distribution of Online Banking Usage across Clusters", 
+       x = "Clusters", 
+       y = "Count of customers") +   
+  theme() +
+  scale_fill_manual(label = c('No', 'Yes'), values = c("lightgreen", "#648FFF")) +
+  geom_text(stat = "prop", size = 3, position = position_fill(vjust = 0.5))
+
+Online_Cluster
+## As expected, more than half of the customers use online banking services in all clusters.
+
